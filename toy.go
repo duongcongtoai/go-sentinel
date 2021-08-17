@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 // ToyKeva simulator used for testing purpose
@@ -14,6 +16,7 @@ type ToyKeva struct {
 	id        string
 	slaves    []toySlave
 	sentinels map[string]toySentinel
+	subs      map[string]chan string //key by fake sessionid
 }
 
 func (keva *ToyKeva) info() string {
@@ -55,21 +58,21 @@ func (keva *ToyKeva) isAlive() bool {
 	return keva.alive
 }
 
-func (keva *ToyKeva) addSentinel(intro Intro) {
-	keva.mu.Lock()
-	defer keva.mu.Unlock()
+// func (keva *ToyKeva) addSentinel(intro Intro) {
+// 	keva.mu.Lock()
+// 	defer keva.mu.Unlock()
 
-	s := toySentinel{
-		addr:        intro.Addr,
-		port:        intro.Port,
-		epoch:       intro.Epoch,
-		masterEpoch: intro.MasterEpoch,
-		masterName:  intro.MasterName,
-		masterPort:  intro.MasterPort,
-		masterAddr:  intro.MasterAddr,
-	}
-	keva.sentinels[intro.RunID] = s
-}
+// 	s := toySentinel{
+// 		addr:        intro.Addr,
+// 		port:        intro.Port,
+// 		epoch:       intro.Epoch,
+// 		masterEpoch: intro.MasterEpoch,
+// 		masterName:  intro.MasterName,
+// 		masterPort:  intro.MasterPort,
+// 		masterAddr:  intro.MasterAddr,
+// 	}
+// 	keva.sentinels[intro.RunID] = s
+// }
 
 type toyClient struct {
 	link      *ToyKeva
@@ -108,23 +111,66 @@ func (cl *toyClient) Ping() (string, error) {
 	return "pong", nil
 }
 
-func (cl *toyClient) ExchangeSentinel(intro Intro) (ExchangeSentinelResponse, error) {
-	cl.link.mu.Lock()
-	var ret []SentinelIntroResponse
-	for _, s := range cl.link.sentinels {
-		ret = append(ret, SentinelIntroResponse{
-			Addr:        s.addr,
-			Port:        s.port,
-			RunID:       s.runID,
-			MasterName:  s.masterName,
-			MasterPort:  s.masterPort,
-			MasterAddr:  s.masterAddr,
-			Epoch:       s.epoch,
-			MasterEpoch: s.masterEpoch,
-		})
-	}
-	cl.link.mu.Unlock()
-
-	cl.link.addSentinel(intro)
-	return ExchangeSentinelResponse{Sentinels: ret}, nil
+type toyHelloChan struct {
+	root      *ToyKeva
+	subChan   chan string
+	sessionID string //
 }
+
+func (c *toyHelloChan) Publish(toBroadcast string) error {
+	c.root.mu.Lock()
+	for sessionID, sub := range c.root.subs {
+		if sessionID == c.sessionID {
+			continue
+		}
+		sub <- toBroadcast
+	}
+	c.root.mu.Unlock()
+	return nil
+}
+
+func (c *toyHelloChan) Receive() (string, error) {
+	newMsg := <-c.subChan
+	return newMsg, nil
+}
+
+func (c *toyHelloChan) Close() error {
+	c.root.mu.Lock()
+	delete(c.root.subs, c.sessionID)
+	c.root.mu.Unlock()
+	close(c.subChan)
+	return nil
+}
+
+func (cl *toyClient) SubscribeHelloChan() *toyHelloChan {
+	newChan := &toyHelloChan{
+		root:      cl.link,
+		subChan:   make(chan string, 1),
+		sessionID: uuid.NewString(),
+	}
+	cl.link.mu.Lock()
+	cl.link.subs[newChan.sessionID] = newChan.subChan
+	cl.link.mu.Unlock()
+	return newChan
+}
+
+// func (cl *toyClient) ExchangeSentinel(intro Intro) (ExchangeSentinelResponse, error) {
+// 	cl.link.mu.Lock()
+// 	var ret []SentinelIntroResponse
+// 	for _, s := range cl.link.sentinels {
+// 		ret = append(ret, SentinelIntroResponse{
+// 			Addr:        s.addr,
+// 			Port:        s.port,
+// 			RunID:       s.runID,
+// 			MasterName:  s.masterName,
+// 			MasterPort:  s.masterPort,
+// 			MasterAddr:  s.masterAddr,
+// 			Epoch:       s.epoch,
+// 			MasterEpoch: s.masterEpoch,
+// 		})
+// 	}
+// 	cl.link.mu.Unlock()
+
+// 	cl.link.addSentinel(intro)
+// 	return ExchangeSentinelResponse{Sentinels: ret}, nil
+// }

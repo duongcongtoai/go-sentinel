@@ -480,40 +480,17 @@ var (
 type internalClient interface {
 	Info() (string, error)
 	Ping() (string, error)
-	ExchangeSentinel(Intro) (ExchangeSentinelResponse, error)
+	SubscribeHelloChan() HelloChan
+}
+
+type HelloChan interface {
+	Close() error
+	Publish(string) error
+	Receive() (string, error)
 }
 
 type internalClientImpl struct {
 	*kevago.InternalClient
-}
-
-func (i *internalClientImpl) SentinelIntroduce(intro Intro) error {
-	return nil
-}
-
-type Intro struct {
-	Addr        string //addr of sentinel
-	Port        string
-	RunID       string //runid of sentinel
-	MasterName  string //master sentinel is serving
-	MasterAddr  string
-	MasterPort  string
-	Epoch       int
-	MasterEpoch int
-}
-
-type ExchangeSentinelResponse struct {
-	Sentinels []SentinelIntroResponse
-}
-type SentinelIntroResponse struct {
-	Addr        string //addr of sentinel
-	Port        string
-	RunID       string //runid of sentinel
-	MasterName  string //master sentinel is serving
-	MasterAddr  string
-	MasterPort  string
-	Epoch       int
-	MasterEpoch int
 }
 
 type sentinelInstance struct {
