@@ -4,12 +4,26 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/spf13/viper"
 	kevago "github.com/tuhuynh27/keva/go-client"
+	"go.uber.org/zap"
 )
+
+var (
+	logger *zap.SugaredLogger
+)
+
+func init() {
+	dlogger, err := zap.NewDevelopment()
+	if err != nil {
+		panic(err)
+	}
+	logger = dlogger.Sugar()
+}
 
 type Config struct {
 	MyID         string
@@ -78,7 +92,7 @@ func (s *Sentinel) masterPingRoutine(m *masterInstance) {
 	defer ticker.Stop()
 	for !m.killed() {
 		<-ticker.C
-		_, err := m.pingClient.Ping()
+		_, err := m.client.Ping()
 		if err != nil {
 			if time.Since(m.lastSuccessfulPing) > m.sentinelConf.DownAfter {
 				//notify if it is down
@@ -126,8 +140,48 @@ func (m *masterInstance) getState() masterInstanceState {
 	return m.state
 }
 
+func (s *Sentinel) subscribeHello(m *masterInstance) {
+	helloChan := m.client.SubscribeHelloChan()
+	for !m.killed() {
+		newmsg, err := helloChan.Receive()
+		if err != nil {
+			logger.Errorf("helloChan.Receive: %s", err)
+			continue
+			//skip for now
+		}
+		parts := strings.Split(newmsg, ",")
+		if len(parts) != 8 {
+			logger.Errorf("helloChan.Receive: invalid format for newmsg: %s", newmsg)
+			continue
+		}
+		runid := parts[2]
+		m.mu.Lock()
+		_, ok := m.sentinels[runid]
+		if !ok {
+			client, err := newRPCClient(parts[0], parts[1])
+			if err != nil {
+				logger.Errorf("newRPCClient: cannot create new client to other sentinel with info: %s", newmsg)
+				m.mu.Unlock()
+				continue
+			}
+			si := &sentinelInstance{
+				mu:         sync.Mutex{},
+				masterDown: false,
+				sdown:      false,
+				client:     client,
+			}
+
+			m.sentinels[runid] = si
+			logger.Infof("subscribeHello: connected to new sentinel: %s", newmsg)
+		}
+		m.mu.Unlock()
+		//ignore if exist for now
+	}
+}
+
 func (s *Sentinel) masterRoutine(m *masterInstance) {
 	go s.masterPingRoutine(m)
+	go s.subscribeHello(m)
 	infoTicker := time.NewTicker(10 * time.Second)
 	for !m.killed() {
 		switch m.getState() {
@@ -140,7 +194,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 				infoTicker.Stop()
 
 			case <-infoTicker.C:
-				info, err := m.infoClient.Info()
+				info, err := m.client.Info()
 				if err != nil {
 					//TODO continue for now
 					continue
@@ -439,6 +493,7 @@ func (s *Sentinel) Start() error {
 	// mInstance.pingClient = &internalClientImpl{cl2}
 
 	go s.masterRoutine(mInstance)
+	go s.serveRPC()
 	return nil
 }
 
@@ -449,12 +504,12 @@ type masterInstance struct {
 	mu           sync.Mutex
 	runID        string
 	slaves       map[string]*slaveInstance
-	sentinels    []*sentinelInstance
+	sentinels    map[string]*sentinelInstance
 	ip           string
 	port         string
 	shutdownChan chan struct{}
-	pingClient   internalClient
-	infoClient   internalClient
+	client       internalClient
+	// infoClient   internalClient
 
 	state          masterInstanceState
 	subjDownNotify chan struct{}
