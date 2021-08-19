@@ -199,12 +199,14 @@ func (s *Sentinel) parseInfoMaster(mname string, info string) (bool, error) {
 	}
 	for key, keep := range slaveCheck {
 		if !keep {
+			m.slaves[key].shutdown()
 			delete(m.slaves, key)
 			// despawn goroutine of this slave and remove it
 		}
 	}
 	for _, item := range newSlaves {
 		m.slaves[item.addr] = item
+		s.slaveRoutine(item)
 		//spawn goroutine for new slave
 	}
 	return false, nil
