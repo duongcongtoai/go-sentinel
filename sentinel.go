@@ -54,9 +54,10 @@ type Sentinel struct {
 	mu              *sync.Mutex
 	quorum          int
 	conf            Config
-	masterInstances map[string]*masterInstance
+	masterInstances map[string]*masterInstance //key by address ip:port
 	instancesLock   sync.Mutex
 	currentEpoch    int
+	votedLeader     int
 	runID           string
 }
 
@@ -96,7 +97,7 @@ func (s *Sentinel) Start() error {
 	if err != nil {
 		return err
 	}
-	switchedRole, err := s.parseInfoMaster(m.Name, infoStr)
+	switchedRole, err := s.parseInfoMaster(m.Addr, infoStr)
 	if err != nil {
 		return err
 	}
@@ -185,7 +186,8 @@ type sentinelClient interface {
 }
 
 type IsMasterDownByAddrArgs struct {
-	Addr         string
+	Name         string
+	IP           string
 	Port         string
 	CurrentEpoch int
 	SelfID       string
@@ -195,3 +197,7 @@ type IsMasterDownByAddrReply struct {
 	VotedLeaderID string
 	LeaderEpoch   int
 }
+
+const (
+	SENTINEL_MAX_DESYNC = 1000
+)

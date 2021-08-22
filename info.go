@@ -113,7 +113,7 @@ func (s *Sentinel) parseInfoSlave(masterName, slaveAddr, info string) (bool, err
 
 // syntax of info replied by keva is different from redis. We need to know at the beginning
 // of the string the role of the instance first
-func (s *Sentinel) parseInfoMaster(mname string, info string) (bool, error) {
+func (s *Sentinel) parseInfoMaster(masterAddress string, info string) (bool, error) {
 	r := bufio.NewScanner(strings.NewReader(info))
 	r.Split(bufio.ScanLines)
 	role, err := s.preparseInfo(r)
@@ -124,7 +124,7 @@ func (s *Sentinel) parseInfoMaster(mname string, info string) (bool, error) {
 		return true, nil
 	}
 	s.instancesLock.Lock()
-	m, ok := s.masterInstances[mname]
+	m, ok := s.masterInstances[masterAddress]
 	s.instancesLock.Unlock()
 	if !ok {
 		return false, fmt.Errorf("master does not exist")
@@ -163,7 +163,7 @@ func (s *Sentinel) parseInfoMaster(mname string, info string) (bool, error) {
 					continue
 				}
 				if idx > len(m.slaves) {
-					fmt.Printf("invalid index for slave %d of master %s", idx, mname)
+					fmt.Printf("invalid index for slave %d of master %s", idx, masterAddress)
 					continue
 				}
 				matches := slaveInfoRegexp.FindStringSubmatch(parts[1])

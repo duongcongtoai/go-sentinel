@@ -161,7 +161,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 			}
 		case masterStateObjDown:
 			//timeout := time.Second*10 + time.Duration(rand.Intn(1000))*time.Millisecond // randomize timeout a bit
-			failOverStartAt := time.Now().Add(time.Duration(rand.Intn(1000)))
+			failOverStartAt := time.Now().Add(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC)))
 			// to avoid 2 leaders share the same vote during leader election
 			//timer := time.NewTimer(timeout) //failOver timeout
 			ctx, cancel := context.WithCancel(context.Background())
@@ -172,6 +172,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 			s.mu.Unlock()
 			m.mu.Lock()
 			m.failOverState = failOverWaitLeaderElection
+			m.failOverStartTime = failOverStartAt
 			m.failOverEpoch = sentinelEpoch
 			m.mu.Unlock()
 			go s.askOtherSentinelsEach1Sec(ctx, m)
@@ -295,6 +296,7 @@ func (s *Sentinel) checkObjDown(m *masterInstance) {
 
 func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInstance) {
 	m.mu.Lock()
+	masterName := m.name
 	masterIp := m.ip
 	masterPort := m.port
 
@@ -318,7 +320,8 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 						return
 					}
 					reply, err := sentinel.client.IsMasterDownByAddr(IsMasterDownByAddrArgs{
-						Addr:         masterIp,
+						Name:         masterName,
+						IP:           masterIp,
 						Port:         masterPort,
 						CurrentEpoch: currentEpoch,
 						SelfID:       selfID,
@@ -351,6 +354,7 @@ func (s *Sentinel) askSentinelsIfMasterIsDown(m *masterInstance) {
 	s.mu.Unlock()
 
 	m.mu.Lock()
+	masterName := m.name
 	masterIp := m.ip
 	masterPort := m.port
 
@@ -364,7 +368,8 @@ func (s *Sentinel) askSentinelsIfMasterIsDown(m *masterInstance) {
 			}
 			if m.getState() == masterStateSubjDown {
 				reply, err := sInstance.client.IsMasterDownByAddr(IsMasterDownByAddrArgs{
-					Addr:         masterIp,
+					Name:         masterName,
+					IP:           masterIp,
 					Port:         masterPort,
 					CurrentEpoch: currentEpoch,
 					SelfID:       "",
@@ -411,8 +416,12 @@ type masterInstance struct {
 
 	lastSuccessfulPing time.Time
 
-	failOverState failOverState
-	failOverEpoch int
+	failOverState     failOverState
+	failOverEpoch     int
+	failOverStartTime time.Time
+
+	leaderEpoch int
+	leaderID    string
 	// failOverStartTime time.Time
 }
 
