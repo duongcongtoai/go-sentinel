@@ -45,8 +45,8 @@ func (s *Sentinel) updateEpoch(newEpoch int) {
 }
 
 func (s *Sentinel) selfID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// s.mu.Lock()
+	// defer s.mu.Unlock()
 	return s.runID
 }
 func (s *Sentinel) voteLeader(m *masterInstance, reqEpoch int, reqRunID string) (leaderEpoch int, leaderID string) {

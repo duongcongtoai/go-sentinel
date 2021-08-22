@@ -59,6 +59,7 @@ type Sentinel struct {
 	currentEpoch    int
 	votedLeader     int
 	runID           string
+	slaveFactory    func(*slaveInstance) *slaveInstance
 }
 
 func NewFromConfig(filepath string) (*Sentinel, error) {
@@ -130,6 +131,7 @@ type internalClientImpl struct {
 }
 
 type sentinelInstance struct {
+	runID               string
 	mu                  sync.Mutex
 	masterDown          bool
 	client              sentinelClient

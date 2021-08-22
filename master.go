@@ -56,6 +56,11 @@ func (s *Sentinel) masterPingRoutine(m *masterInstance) {
 
 	}
 }
+func (m *masterInstance) getFailOverEpoch() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failOverEpoch
+}
 
 func (m *masterInstance) getFailOverState() failOverState {
 	m.mu.Lock()
@@ -69,8 +74,31 @@ func (m *masterInstance) getState() masterInstanceState {
 	return m.state
 }
 
+// for now, only say hello through master, redis also say hello through slaves
+func (s *Sentinel) sayHelloRoutine(m *masterInstance, helloChan HelloChan) {
+	for !m.killed() {
+		time.Sleep(1 * time.Second)
+		m.mu.Lock()
+		masterName := m.name
+		masterIP := m.ip
+		masterPort := m.port
+		masterConfigEpoch := m.configEpoch
+		m.mu.Unlock()
+		info := fmt.Sprintf("%s,%s,%s,%d,%s,%s,%s,%d",
+			s.conf.Binds[0], s.conf.Port, s.selfID(),
+			s.getCurrentEpoch(), masterName, masterIP, masterPort, masterConfigEpoch,
+		)
+		err := helloChan.Publish(info)
+		if err != nil {
+			logger.Errorf("helloChan.Publish: %s", err)
+		}
+	}
+}
+
 func (s *Sentinel) subscribeHello(m *masterInstance) {
 	helloChan := m.client.SubscribeHelloChan()
+
+	go s.sayHelloRoutine(m, helloChan)
 	for !m.killed() {
 		newmsg, err := helloChan.Receive()
 		if err != nil {
@@ -98,6 +126,7 @@ func (s *Sentinel) subscribeHello(m *masterInstance) {
 				masterDown: false,
 				sdown:      false,
 				client:     client,
+				runID:      runid,
 			}
 
 			m.sentinels[runid] = si
@@ -172,7 +201,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 			s.mu.Unlock()
 			m.mu.Lock()
 			m.failOverState = failOverWaitLeaderElection
-			m.failOverStartTime = failOverStartAt
+			m.failOverStartTime = failOverStartAt // this can be refresh if current sentinel voted for other sentinels
 			m.failOverEpoch = sentinelEpoch
 			m.mu.Unlock()
 			go s.askOtherSentinelsEach1Sec(ctx, m)
@@ -181,19 +210,24 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 				switch m.getFailOverState() {
 				case failOverWaitLeaderElection:
 					//check if is leader yet
-					if isLeader := s.checkIsLeader(m); isLeader {
-						continue
+					leader := s.checkWhoIsLeader(m)
+					isLeader := leader != "" && leader == s.selfID()
+					if !isLeader {
+						time.Sleep(1 * time.Second)
+						//abort if failover take too long
+						if time.Since(failOverStartAt) > 10*time.Second {
+							m.mu.Lock()
+							m.failOverState = failOverNone
+							m.mu.Unlock()
+							cancel()
+							break failOverFSM
+						}
 					}
-					time.Sleep(1 * time.Second)
-					//abort if failover take too long
-					if time.Since(failOverStartAt) > 10*time.Second {
-						//abort
-						m.mu.Lock()
-						m.failOverState = failOverNone
-						m.mu.Unlock()
-						cancel()
-						break failOverFSM
-					}
+					//is leader
+					m.mu.Lock()
+					m.failOverState = failOverSelectSlave
+					m.mu.Unlock()
+
 				case failOverSelectSlave:
 					//TODO
 				case failOverPromoteSlave:
@@ -202,76 +236,51 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					//TODO
 				}
 			}
-
-			//BIG TODO
 		}
 	}
 }
 
-func (s *Sentinel) checkIsLeader(m *masterInstance) bool {
-	return false
-	//dict *counters;
-	//dictIterator *di;
-	//dictEntry *de;
-	//unsigned int voters = 0, voters_quorum;
-	//char *myvote;
-	//char *winner = NULL;
-	//uint64_t leader_epoch;
-	//uint64_t max_votes = 0;
-	//
-	//serverAssert(master->flags & (SRI_O_DOWN|SRI_FAILOVER_IN_PROGRESS));
-	//counters = dictCreate(&leaderVotesDictType,NULL);
-	//
-	//voters = dictSize(master->sentinels)+1; /* All the other sentinels and me.*/
-	//
-	///* Count other sentinels votes */
-	//di = dictGetIterator(master->sentinels);
-	//while((de = dictNext(di)) != NULL) {
-	//	sentinelRedisInstance *ri = dictGetVal(de);
-	//	if (ri->leader != NULL && ri->leader_epoch == sentinel.current_epoch)
-	//		sentinelLeaderIncr(counters,ri->leader);
-	//}
-	//dictReleaseIterator(di);
-	//
-	///* Check what's the winner. For the winner to win, it needs two conditions:
-	// * 1) Absolute majority between voters (50% + 1).
-	// * 2) And anyway at least master->quorum votes. */
-	//di = dictGetIterator(counters);
-	//while((de = dictNext(di)) != NULL) {
-	//	uint64_t votes = dictGetUnsignedIntegerVal(de);
-	//
-	//	if (votes > max_votes) {
-	//		max_votes = votes;
-	//		winner = dictGetKey(de);
-	//	}
-	//}
-	//dictReleaseIterator(di);
-	//
-	///* Count this Sentinel vote:
-	// * if this Sentinel did not voted yet, either vote for the most
-	// * common voted sentinel, or for itself if no vote exists at all. */
-	//if (winner)
-	//	myvote = sentinelVoteLeader(master,epoch,winner,&leader_epoch);
-	//else
-	//myvote = sentinelVoteLeader(master,epoch,sentinel.myid,&leader_epoch);
-	//
-	//if (myvote && leader_epoch == epoch) {
-	//	uint64_t votes = sentinelLeaderIncr(counters,myvote);
-	//
-	//	if (votes > max_votes) {
-	//		max_votes = votes;
-	//		winner = myvote;
-	//	}
-	//}
-	//
-	//voters_quorum = voters/2+1;
-	//if (winner && (max_votes < voters_quorum || max_votes < master->quorum))
-	//	winner = NULL;
-	//
-	//winner = winner ? sdsnew(winner) : NULL;
-	//sdsfree(myvote);
-	//dictRelease(counters);
-	//return winner;
+func (s *Sentinel) checkWhoIsLeader(m *masterInstance) string {
+	leaders := map[string]int{}
+	currentEpoch := s.getCurrentEpoch()
+	m.mu.Lock()
+	for _, sen := range m.sentinels {
+		sen.mu.Lock()
+		if sen.leaderID != "" && sen.leaderEpoch == currentEpoch {
+			leaders[sen.runID] = leaders[sen.runID] + 1
+		}
+		sen.mu.Unlock()
+	}
+	m.mu.Unlock()
+	maxVote := 0
+	var winner string
+	for runID, vote := range leaders {
+		if vote > maxVote {
+			maxVote = vote
+			winner = runID
+		}
+	}
+	epoch := m.getFailOverEpoch()
+	var leaderEpoch int
+	var votedByMe string
+	if winner != "" {
+		// vote for the most winned candidate
+		leaderEpoch, votedByMe = s.voteLeader(m, epoch, winner)
+	} else {
+		leaderEpoch, votedByMe = s.voteLeader(m, epoch, s.selfID())
+	}
+	if votedByMe != "" && leaderEpoch == epoch {
+		leaders[votedByMe] = leaders[votedByMe] + 1
+		if leaders[votedByMe] > maxVote {
+			maxVote = leaders[votedByMe]
+			winner = votedByMe
+		}
+	}
+	quorum := len(m.sentinels)/2 + 1
+	if winner != "" && (maxVote < quorum || maxVote < m.sentinelConf.Quorum) {
+		winner = ""
+	}
+	return winner
 }
 
 func (s *Sentinel) checkObjDown(m *masterInstance) {
@@ -333,6 +342,12 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 						sentinel.lastMasterDownReply = time.Now()
 						sentinel.masterDown = reply.MasterDown
 						if reply.VotedLeaderID != "" {
+							if sentinel.leaderID != reply.VotedLeaderID {
+								logger.Infof("sentinel.client.IsMasterDownByAddr: sentinel %s voted for %s",
+									sentinel.runID,
+									reply.VotedLeaderID,
+								)
+							}
 							sentinel.leaderEpoch = reply.LeaderEpoch
 							sentinel.leaderID = reply.VotedLeaderID
 						}
@@ -380,11 +395,6 @@ func (s *Sentinel) askSentinelsIfMasterIsDown(m *masterInstance) {
 					sInstance.mu.Lock()
 					sInstance.lastMasterDownReply = time.Now()
 					sInstance.masterDown = reply.MasterDown
-					if reply.VotedLeaderID != "" {
-						sInstance.leaderEpoch = reply.LeaderEpoch
-						sInstance.leaderID = reply.VotedLeaderID
-					}
-
 					sInstance.mu.Unlock()
 				}
 			} else {
@@ -423,6 +433,8 @@ type masterInstance struct {
 	leaderEpoch int
 	leaderID    string
 	// failOverStartTime time.Time
+
+	configEpoch int
 }
 
 type failOverState int
