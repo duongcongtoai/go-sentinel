@@ -76,7 +76,9 @@ func (s *Sentinel) IsMasterDownByAddr(req *IsMasterDownByAddrArgs, reply *IsMast
 	master, exist := s.masterInstances[addr]
 	s.mu.Unlock()
 	if !exist {
-		return fmt.Errorf("master does not exist")
+		err := fmt.Errorf("master does not exist")
+		logger.Errorf(err.Error())
+		return err
 	}
 	reply.MasterDown = master.getState() == masterStateSubjDown
 	if req.SelfID != "" {

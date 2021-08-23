@@ -23,23 +23,23 @@ func init() {
 }
 
 type Config struct {
-	MyID         string
-	Binds        []string //TODO: understand how to bind multiple network interfaces
-	Port         string
-	Masters      []MasterMonitor //TODO: support multiple master
-	CurrentEpoch int
+	MyID         string          `mapstructure:"my_id"`
+	Binds        []string        `mapstructure:"binds"` //TODO: understand how to bind multiple network interfaces
+	Port         string          `mapstructure:"port"`
+	Masters      []MasterMonitor `mapstructure:"masters"`
+	CurrentEpoch int             `mapstructure:"current_epoch"`
 }
 
 type MasterMonitor struct {
-	Name            string
-	Addr            string
-	Quorum          int
-	DownAfter       time.Duration
-	FailoverTimeout time.Duration
-	ConfigEpoch     int //epoch of master received from hello message
-	LeaderEpoch     int //last leader epoch
-	KnownReplicas   []KnownReplica
-	KnownSentinels  []KnownSentinel
+	Name            string          `mapstructure:"name"`
+	Addr            string          `mapstructure:"addr"`
+	Quorum          int             `mapstructure:"quorum"`
+	DownAfter       time.Duration   `mapstructure:"down_after"`
+	FailoverTimeout time.Duration   `mapstructure:"failover_timeout"`
+	ConfigEpoch     int             `mapstructure:"config_epoch"` //epoch of master received from hello message
+	LeaderEpoch     int             `mapstructure:"config_epoch"` //last leader epoch
+	KnownReplicas   []KnownReplica  `mapstructure:"known_replicas"`
+	KnownSentinels  []KnownSentinel `mapstructure:"known_sentinels`
 }
 type KnownSentinel struct {
 	ID   string
@@ -55,18 +55,35 @@ type Sentinel struct {
 	quorum          int
 	conf            Config
 	masterInstances map[string]*masterInstance //key by address ip:port
-	instancesLock   sync.Mutex
 	currentEpoch    int
-	votedLeader     int
 	runID           string
-	slaveFactory    func(*slaveInstance) *slaveInstance
+	slaveFactory    func(*slaveInstance) error
+	clientFactory   func(string) (internalClient, error)
+}
+
+func defaultSlaveFactory(sl *slaveInstance) error {
+	client, err := newInternalClient(sl.addr)
+	if err != nil {
+		return err
+	}
+	sl.client = client
+	return nil
+}
+
+func newInternalClient(addr string) (internalClient, error) {
+	cl, err := kevago.NewInternalClient(addr)
+	if err != nil {
+		return nil, err
+	}
+	return &internalClientImpl{cl}, nil
 }
 
 func NewFromConfig(filepath string) (*Sentinel, error) {
-	viper.AddConfigPath(filepath)
 	viper.SetConfigType("yaml")
+	viper.SetConfigFile(filepath)
 	err := viper.ReadInConfig()
 	if err != nil {
+		fmt.Println("here1")
 		return nil, err
 	}
 	var conf Config
@@ -75,7 +92,10 @@ func NewFromConfig(filepath string) (*Sentinel, error) {
 		return nil, err
 	}
 	return &Sentinel{
-		conf: conf,
+		conf:            conf,
+		mu:              &sync.Mutex{},
+		clientFactory:   newInternalClient,
+		masterInstances: map[string]*masterInstance{},
 	}, nil
 }
 
@@ -84,7 +104,7 @@ func (s *Sentinel) Start() error {
 		return fmt.Errorf("only support monitoring 1 master for now")
 	}
 	m := s.conf.Masters[0]
-	cl, err := kevago.NewInternalClient(m.Addr)
+	cl, err := s.clientFactory(m.Addr)
 	if err != nil {
 		return err
 	}
@@ -98,6 +118,11 @@ func (s *Sentinel) Start() error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	s.masterInstances[m.Addr] = &masterInstance{
+		mu: sync.Mutex{},
+	}
+	s.mu.Unlock()
 	switchedRole, err := s.parseInfoMaster(m.Addr, infoStr)
 	if err != nil {
 		return err
@@ -128,6 +153,11 @@ type HelloChan interface {
 
 type internalClientImpl struct {
 	*kevago.InternalClient
+}
+
+func (s *internalClientImpl) SubscribeHelloChan() HelloChan {
+	panic("unimplemented")
+	return nil
 }
 
 type sentinelInstance struct {

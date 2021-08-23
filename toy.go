@@ -84,12 +84,24 @@ type toyClient struct {
 }
 
 func NewToyKeva() *ToyKeva {
-	return &ToyKeva{}
+	return &ToyKeva{
+		mu: &sync.Mutex{},
+	}
+}
+func (keva *ToyKeva) turnToSlave() {
+	keva.role = "slave"
+	keva.alive = true
+}
+
+func (keva *ToyKeva) turnToMaster() {
+	keva.role = "master"
+	keva.alive = true
 }
 
 func NewToyKevaClient(keva *ToyKeva) *toyClient {
 	return &toyClient{
 		link: keva,
+		mu:   &sync.Mutex{},
 	}
 }
 
@@ -142,7 +154,7 @@ func (c *toyHelloChan) Close() error {
 	return nil
 }
 
-func (cl *toyClient) SubscribeHelloChan() *toyHelloChan {
+func (cl *toyClient) SubscribeHelloChan() HelloChan {
 	newChan := &toyHelloChan{
 		root:      cl.link,
 		subChan:   make(chan string, 1),

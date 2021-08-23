@@ -20,11 +20,13 @@ func (s *Sentinel) parseInfoSlave(masterName, slaveAddr, info string) (bool, err
 	if role != instanceRoleSlave {
 		return true, nil
 	}
-	s.instancesLock.Lock()
+	s.mu.Lock()
 	m, ok := s.masterInstances[masterName]
-	s.instancesLock.Unlock()
+	s.mu.Unlock()
 	if !ok {
-		return false, fmt.Errorf("master does not exist")
+		err := fmt.Errorf("master does not exist")
+		logger.Errorf(err.Error())
+		return false, err
 	}
 	m.mu.Lock()
 
@@ -123,11 +125,13 @@ func (s *Sentinel) parseInfoMaster(masterAddress string, info string) (bool, err
 	if role != instanceRoleMaster {
 		return true, nil
 	}
-	s.instancesLock.Lock()
+	s.mu.Lock()
 	m, ok := s.masterInstances[masterAddress]
-	s.instancesLock.Unlock()
+	s.mu.Unlock()
 	if !ok {
-		return false, fmt.Errorf("master does not exist")
+		err := fmt.Errorf("master does not exist")
+		logger.Errorf(err.Error())
+		return false, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -176,13 +180,18 @@ func (s *Sentinel) parseInfoMaster(masterAddress string, info string) (bool, err
 				slave, exist := m.slaves[addr]
 
 				if !exist {
-					newSlave := s.slaveFactory(&slaveInstance{
+					newslave := &slaveInstance{
 						masterHost: m.ip,
 						masterPort: m.port,
 						addr:       addr,
 						replOffset: replOffset,
-					})
-					newSlaves = append(newSlaves, newSlave)
+					}
+					err := s.slaveFactory(newslave)
+					if err != nil {
+						logger.Errorf("s.slaveFactory: %s", err)
+						continue
+					}
+					newSlaves = append(newSlaves, newslave)
 
 				} else {
 					slaveCheck[addr] = true
