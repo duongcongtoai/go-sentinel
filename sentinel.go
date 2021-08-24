@@ -2,9 +2,11 @@ package sentinel
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
 	kevago "github.com/tuhuynh27/keva/go-client"
 	"go.uber.org/zap"
@@ -91,7 +93,11 @@ func NewFromConfig(filepath string) (*Sentinel, error) {
 	if err != nil {
 		return nil, err
 	}
+	if conf.MyID == "" {
+		conf.MyID = uuid.NewString()
+	}
 	return &Sentinel{
+		runID:           conf.MyID,
 		conf:            conf,
 		mu:              &sync.Mutex{},
 		clientFactory:   newInternalClient,
@@ -104,10 +110,13 @@ func (s *Sentinel) Start() error {
 		return fmt.Errorf("only support monitoring 1 master for now")
 	}
 	m := s.conf.Masters[0]
+	parts := strings.Split(m.Addr, ":")
+	masterIP, masterPort := parts[0], parts[1]
 	cl, err := s.clientFactory(m.Addr)
 	if err != nil {
 		return err
 	}
+
 	// cl2, err := kevago.NewInternalClient(m.Addr)
 	if err != nil {
 		return err
@@ -119,9 +128,20 @@ func (s *Sentinel) Start() error {
 		return err
 	}
 	s.mu.Lock()
-	s.masterInstances[m.Addr] = &masterInstance{
-		mu: sync.Mutex{},
+	master := &masterInstance{
+		sentinelConf:       m,
+		name:               m.Name,
+		ip:                 masterIP,
+		port:               masterPort,
+		configEpoch:        m.ConfigEpoch,
+		mu:                 sync.Mutex{},
+		client:             cl,
+		slaves:             map[string]*slaveInstance{},
+		sentinels:          map[string]*sentinelInstance{},
+		state:              masterStateUp,
+		lastSuccessfulPing: time.Now(),
 	}
+	s.masterInstances[m.Addr] = master
 	s.mu.Unlock()
 	switchedRole, err := s.parseInfoMaster(m.Addr, infoStr)
 	if err != nil {
@@ -130,13 +150,14 @@ func (s *Sentinel) Start() error {
 	if switchedRole {
 		return fmt.Errorf("reported address of master %s is not currently in master role", m.Name)
 	}
-	mInstance := s.masterInstances[m.Name]
-	// mInstance.infoClient = &internalClientImpl{cl}
-	// mInstance.pingClient = &internalClientImpl{cl2}
 
-	go s.masterRoutine(mInstance)
+	go s.masterRoutine(master)
 	go s.serveRPC()
 	return nil
+}
+
+func (s *Sentinel) Shutdown() {
+	panic("unimplemented")
 }
 
 type internalClient interface {

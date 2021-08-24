@@ -28,6 +28,7 @@ func (s *Sentinel) masterPingRoutine(m *masterInstance) {
 				if m.getState() == masterStateUp {
 					m.mu.Lock()
 					m.state = masterStateSubjDown
+					logger.Warnf("master %s is subjectively down", m.name)
 					m.mu.Unlock()
 					select {
 					case m.subjDownNotify <- struct{}{}:

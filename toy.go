@@ -52,40 +52,29 @@ type toySlave struct {
 	lag    int
 }
 
+func (keva *ToyKeva) kill() {
+	keva.mu.Lock()
+	defer keva.mu.Unlock()
+	keva.alive = false
+}
+
 func (keva *ToyKeva) isAlive() bool {
 	keva.mu.Lock()
 	defer keva.mu.Unlock()
 	return keva.alive
 }
 
-// func (keva *ToyKeva) addSentinel(intro Intro) {
-// 	keva.mu.Lock()
-// 	defer keva.mu.Unlock()
-
-// 	s := toySentinel{
-// 		addr:        intro.Addr,
-// 		port:        intro.Port,
-// 		epoch:       intro.Epoch,
-// 		masterEpoch: intro.MasterEpoch,
-// 		masterName:  intro.MasterName,
-// 		masterPort:  intro.MasterPort,
-// 		masterAddr:  intro.MasterAddr,
-// 	}
-// 	keva.sentinels[intro.RunID] = s
-// }
-
 type toyClient struct {
 	link      *ToyKeva
 	connected bool
 	mu        *sync.Mutex
-	//Info() (string, error)
-	//Ping() (string, error)
-	//SentinelIntroduce(Intro) error
 }
 
 func NewToyKeva() *ToyKeva {
 	return &ToyKeva{
-		mu: &sync.Mutex{},
+		mu:    &sync.Mutex{},
+		subs:  map[string]chan string{},
+		alive: true,
 	}
 }
 func (keva *ToyKeva) turnToSlave() {
@@ -100,13 +89,20 @@ func (keva *ToyKeva) turnToMaster() {
 
 func NewToyKevaClient(keva *ToyKeva) *toyClient {
 	return &toyClient{
-		link: keva,
-		mu:   &sync.Mutex{},
+		link:      keva,
+		mu:        &sync.Mutex{},
+		connected: true,
 	}
 }
 
 func (cl *toyClient) Info() (string, error) {
 	return cl.link.info(), nil
+}
+
+func (cl *toyClient) disconnect() {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	cl.connected = false
 }
 
 // simulate network partition

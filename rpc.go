@@ -45,8 +45,6 @@ func (s *Sentinel) updateEpoch(newEpoch int) {
 }
 
 func (s *Sentinel) selfID() string {
-	// s.mu.Lock()
-	// defer s.mu.Unlock()
 	return s.runID
 }
 func (s *Sentinel) voteLeader(m *masterInstance, reqEpoch int, reqRunID string) (leaderEpoch int, leaderID string) {
@@ -90,11 +88,14 @@ func (s *Sentinel) IsMasterDownByAddr(req *IsMasterDownByAddrArgs, reply *IsMast
 }
 
 func (s *Sentinel) serveRPC() {
-	rpc.Register(s)
-	rpc.HandleHTTP()
+	serv := rpc.NewServer()
+	serv.Register(s)
+
+	mux := http.NewServeMux()
+	mux.Handle(rpc.DefaultRPCPath, serv)
 	l, e := net.Listen("tcp", fmt.Sprintf(":%s", s.conf.Port))
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	http.Serve(l, nil)
+	http.Serve(l, mux)
 }
