@@ -68,6 +68,11 @@ func (m *masterInstance) getFailOverState() failOverState {
 	defer m.mu.Unlock()
 	return m.failOverState
 }
+func (m *masterInstance) getAddr() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return fmt.Sprintf("%s:%s", m.ip, m.port)
+}
 
 func (m *masterInstance) getState() masterInstanceState {
 	m.mu.Lock()
@@ -158,7 +163,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					//TODO continue for now
 					continue
 				}
-				roleSwitched, err := s.parseInfoMaster(m.name, info)
+				roleSwitched, err := s.parseInfoMaster(m.getAddr(), info)
 				if err != nil {
 					logger.Errorf("parseInfoMaster: %v", err)
 					continue
@@ -174,7 +179,6 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 		case masterStateSubjDown:
 		SdownLoop:
 			for {
-				time.Sleep(1 * time.Second)
 				switch m.getState() {
 				case masterStateSubjDown:
 					// check if quorum as met
@@ -188,6 +192,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 				case masterStateUp:
 					break SdownLoop
 				}
+				time.Sleep(1 * time.Second)
 			}
 		case masterStateObjDown:
 			//timeout := time.Second*10 + time.Duration(rand.Intn(1000))*time.Millisecond // randomize timeout a bit
@@ -216,7 +221,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					if !isLeader {
 						time.Sleep(1 * time.Second)
 						//abort if failover take too long
-						if time.Since(failOverStartAt) > 10*time.Second {
+						if time.Since(failOverStartAt) > m.sentinelConf.FailoverTimeout {
 							m.mu.Lock()
 							m.failOverState = failOverNone
 							m.mu.Unlock()

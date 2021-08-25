@@ -2,6 +2,7 @@ package sentinel
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,7 @@ type Sentinel struct {
 	runID           string
 	slaveFactory    func(*slaveInstance) error
 	clientFactory   func(string) (internalClient, error)
+	listener        net.Listener
 }
 
 func defaultSlaveFactory(sl *slaveInstance) error {
@@ -157,7 +159,7 @@ func (s *Sentinel) Start() error {
 }
 
 func (s *Sentinel) Shutdown() {
-	panic("unimplemented")
+	s.listener.Close()
 }
 
 type internalClient interface {

@@ -97,5 +97,6 @@ func (s *Sentinel) serveRPC() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+	s.listener = l
 	http.Serve(l, mux)
 }

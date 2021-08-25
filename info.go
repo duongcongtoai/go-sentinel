@@ -129,7 +129,7 @@ func (s *Sentinel) parseInfoMaster(masterAddress string, info string) (bool, err
 	m, ok := s.masterInstances[masterAddress]
 	s.mu.Unlock()
 	if !ok {
-		err := fmt.Errorf("master does not exist")
+		err := fmt.Errorf("master %s does not exist", masterAddress)
 		logger.Errorf(err.Error())
 		return false, err
 	}
