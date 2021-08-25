@@ -5,7 +5,7 @@ port: "25673"
 masters:
   - name: "mymaster"
     addr: "localhost:6767"
-    quorum: 1 
+    quorum: 2 
     down_after: 5s
     failover_timeout: 10s
     config_epoch: 

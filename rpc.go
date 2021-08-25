@@ -78,7 +78,7 @@ func (s *Sentinel) IsMasterDownByAddr(req *IsMasterDownByAddrArgs, reply *IsMast
 		logger.Errorf(err.Error())
 		return err
 	}
-	reply.MasterDown = master.getState() == masterStateSubjDown
+	reply.MasterDown = master.getState() >= masterStateSubjDown
 	if req.SelfID != "" {
 		leaderEpoch, leaderID := s.voteLeader(master, req.CurrentEpoch, req.SelfID)
 		reply.LeaderEpoch = leaderEpoch

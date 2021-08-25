@@ -142,6 +142,7 @@ func (s *Sentinel) Start() error {
 		sentinels:          map[string]*sentinelInstance{},
 		state:              masterStateUp,
 		lastSuccessfulPing: time.Now(),
+		subjDownNotify:     make(chan struct{}),
 	}
 	s.masterInstances[m.Addr] = master
 	s.mu.Unlock()
@@ -184,9 +185,9 @@ func (s *internalClientImpl) SubscribeHelloChan() HelloChan {
 }
 
 type sentinelInstance struct {
-	runID               string
-	mu                  sync.Mutex
-	masterDown          bool
+	runID string
+	mu    sync.Mutex
+	// masterDown          bool
 	client              sentinelClient
 	lastMasterDownReply time.Time
 

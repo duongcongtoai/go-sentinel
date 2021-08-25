@@ -128,11 +128,10 @@ func (s *Sentinel) subscribeHello(m *masterInstance) {
 				continue
 			}
 			si := &sentinelInstance{
-				mu:         sync.Mutex{},
-				masterDown: false,
-				sdown:      false,
-				client:     client,
-				runID:      runid,
+				mu:     sync.Mutex{},
+				sdown:  false,
+				client: client,
+				runID:  runid,
 			}
 
 			m.sentinels[runid] = si
@@ -292,8 +291,8 @@ func (s *Sentinel) checkWhoIsLeader(m *masterInstance) string {
 func (s *Sentinel) checkObjDown(m *masterInstance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	quorum := s.quorum
-	if len(m.sentinels) <= quorum {
+	quorum := m.sentinelConf.Quorum
+	if len(m.sentinels)+1 < quorum {
 		panic(fmt.Sprintf("quorum too large (%d) or too few sentinel instances (%d)", quorum, len(m.sentinels)))
 		// TODO: log warning only
 	}
@@ -318,7 +317,7 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 	for idx := range m.sentinels {
 		sentinel := m.sentinels[idx]
 		go func() {
-			for m.getState() == masterStateSubjDown {
+			for m.getState() >= masterStateSubjDown {
 				select {
 				case <-ctx.Done():
 					return
@@ -346,7 +345,7 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 					} else {
 						sentinel.mu.Lock()
 						sentinel.lastMasterDownReply = time.Now()
-						sentinel.masterDown = reply.MasterDown
+						sentinel.sdown = reply.MasterDown
 						if reply.VotedLeaderID != "" {
 							if sentinel.leaderID != reply.VotedLeaderID {
 								logger.Infof("sentinel.client.IsMasterDownByAddr: sentinel %s voted for %s",
@@ -400,7 +399,7 @@ func (s *Sentinel) askSentinelsIfMasterIsDown(m *masterInstance) {
 				} else {
 					sInstance.mu.Lock()
 					sInstance.lastMasterDownReply = time.Now()
-					sInstance.masterDown = reply.MasterDown
+					sInstance.sdown = reply.MasterDown
 					sInstance.mu.Unlock()
 				}
 			} else {

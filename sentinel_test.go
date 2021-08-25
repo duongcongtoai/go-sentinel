@@ -167,7 +167,7 @@ func TestODown(t *testing.T) {
 		gr.Go(func() error {
 			met := eventually(t, func() bool {
 				return masterStateIs(masterAddr, localSentinel, masterStateObjDown)
-			}, 4*time.Second)
+			}, 5*time.Second)
 			if !met {
 				return fmt.Errorf("sentinel %s did not recognize master as o down", localSentinel.listener.Addr())
 			}
