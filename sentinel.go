@@ -82,19 +82,7 @@ func newInternalClient(addr string) (internalClient, error) {
 	return &internalClientImpl{cl}, nil
 }
 
-func NewFromConfig(filepath string) (*Sentinel, error) {
-	viper.SetConfigType("yaml")
-	viper.SetConfigFile(filepath)
-	err := viper.ReadInConfig()
-	if err != nil {
-		fmt.Println("here1")
-		return nil, err
-	}
-	var conf Config
-	err = viper.Unmarshal(&conf)
-	if err != nil {
-		return nil, err
-	}
+func NewFromConfig(conf Config) (*Sentinel, error) {
 	if conf.MyID == "" {
 		conf.MyID = uuid.NewString()
 	}
@@ -105,6 +93,21 @@ func NewFromConfig(filepath string) (*Sentinel, error) {
 		clientFactory:   newInternalClient,
 		masterInstances: map[string]*masterInstance{},
 	}, nil
+}
+
+func NewFromConfigFile(filepath string) (*Sentinel, error) {
+	viper.SetConfigType("yaml")
+	viper.SetConfigFile(filepath)
+	err := viper.ReadInConfig()
+	if err != nil {
+		return nil, err
+	}
+	var conf Config
+	err = viper.Unmarshal(&conf)
+	if err != nil {
+		return nil, err
+	}
+	return NewFromConfig(conf)
 }
 
 func (s *Sentinel) Start() error {

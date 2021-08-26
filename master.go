@@ -57,6 +57,18 @@ func (s *Sentinel) masterPingRoutine(m *masterInstance) {
 
 	}
 }
+
+func (m *masterInstance) getFailOverStartTime() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failOverStartTime
+}
+
+func (m *masterInstance) setFailOverEpoch(newEpoch int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failOverEpoch = newEpoch
+}
 func (m *masterInstance) getFailOverEpoch() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -194,22 +206,26 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 				time.Sleep(1 * time.Second)
 			}
 		case masterStateObjDown:
-			//timeout := time.Second*10 + time.Duration(rand.Intn(1000))*time.Millisecond // randomize timeout a bit
-			failOverStartAt := time.Now().Add(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC)))
-			// to avoid 2 leaders share the same vote during leader election
-			//timer := time.NewTimer(timeout) //failOver timeout
 			ctx, cancel := context.WithCancel(context.Background())
-			// set failOver state back to none, so it go and promote it selve in regress
-			s.mu.Lock()
-			s.currentEpoch += 1
-			sentinelEpoch := s.currentEpoch
-			s.mu.Unlock()
-			m.mu.Lock()
-			m.failOverState = failOverWaitLeaderElection
-			m.failOverStartTime = failOverStartAt // this can be refresh if current sentinel voted for other sentinels
-			m.failOverEpoch = sentinelEpoch
-			m.mu.Unlock()
 			go s.askOtherSentinelsEach1Sec(ctx, m)
+			for m.getState() == masterStateObjDown {
+				// this code only has to wait in case failover timeout reached and it needs to wait 1 more failover timeout duration
+				// before trying failover again
+				secondsLeft := time.Since(m.getFailOverStartTime()) - 2*m.sentinelConf.FailoverTimeout
+				if secondsLeft <= 0 {
+					locked(s.mu, func() {
+						s.currentEpoch += 1
+						locked(&m.mu, func() {
+							m.failOverState = failOverWaitLeaderElection
+							m.failOverStartTime = time.Now().Add(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC)))
+							m.failOverEpoch = s.currentEpoch
+						})
+					})
+					break
+				}
+				<-time.NewTimer(secondsLeft).C
+			}
+			// If any logic changing state of master to something != masterStateObjDown, this code below will be broken
 		failOverFSM:
 			for {
 				switch m.getFailOverState() {
@@ -220,7 +236,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					if !isLeader {
 						time.Sleep(1 * time.Second)
 						//abort if failover take too long
-						if time.Since(failOverStartAt) > m.sentinelConf.FailoverTimeout {
+						if time.Since(m.getFailOverStartTime()) > m.sentinelConf.FailoverTimeout {
 							m.mu.Lock()
 							m.failOverState = failOverNone
 							m.mu.Unlock()
@@ -228,7 +244,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 							break failOverFSM
 						}
 					}
-					//is leader
+					// do not call cancel(), keep receiving update from other sentinel
 					m.mu.Lock()
 					m.failOverState = failOverSelectSlave
 					m.mu.Unlock()
@@ -243,6 +259,12 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 			}
 		}
 	}
+}
+
+func locked(mu *sync.Mutex, f func()) {
+	mu.Lock()
+	defer mu.Unlock()
+	f()
 }
 
 func (s *Sentinel) checkWhoIsLeader(m *masterInstance) string {
@@ -322,16 +344,21 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 				case <-ctx.Done():
 					return
 				default:
-					s.mu.Lock()
-					currentEpoch := s.currentEpoch //epoch may change during failover
-					selfID := s.runID              // locked as well for sure
-					s.mu.Unlock()
 
 					sentinel.mu.Lock()
 					lastReply := sentinel.lastMasterDownReply
 					sentinel.mu.Unlock()
 					if time.Since(lastReply) < 1*time.Second {
 						return
+					}
+					s.mu.Lock()
+					currentEpoch := s.currentEpoch //epoch may change during failover
+					selfID := s.runID              // locked as well for sure
+					s.mu.Unlock()
+
+					// do not ask for vote if has not started failover
+					if m.getFailOverState() == failOverNone {
+						selfID = ""
 					}
 					reply, err := sentinel.client.IsMasterDownByAddr(IsMasterDownByAddrArgs{
 						Name:         masterName,
@@ -341,6 +368,7 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 						SelfID:       selfID,
 					})
 					if err != nil {
+						logger.Errorf("sentinel.client.IsMasterDownByAddr: %s", err)
 						//skip for now
 					} else {
 						sentinel.mu.Lock()
