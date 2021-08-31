@@ -18,10 +18,19 @@ var (
 )
 
 type testSuite struct {
+	mu        *sync.Mutex
 	instances []*Sentinel
 	links     []*toyClient
 	conf      Config
 	master    *ToyKeva
+	history
+}
+type history struct {
+	termsVote map[int][]termInfo // key by term seq, val is array of each sentinels' term info
+}
+type termInfo struct {
+	selfVote      string
+	neighborVotes map[string]string // info about what a sentinel sees other sentinel voted
 }
 
 func (t *testSuite) CleanUp() {
@@ -82,8 +91,12 @@ func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Conf
 	return &testSuite{
 		instances: sentinels,
 		links:     links,
+		mu:        new(sync.Mutex),
 		conf:      conf,
 		master:    master,
+		history: history{
+			termsVote: map[int][]termInfo{},
+		},
 	}
 }
 
@@ -195,17 +208,148 @@ func TestODown(t *testing.T) {
 }
 
 func TestLeaderElection(t *testing.T) {
-	// suite := setup(t,3,)
+	testLeader := func(t *testing.T, numInstances int) {
+		suite := setupWithCustomConfig(t, numInstances, func(c *Config) {
+			c.Masters[0].Quorum = numInstances/2 + 1 // force normal quorum
+		})
+		suite.master.kill()
+		time.Sleep(suite.conf.Masters[0].DownAfter)
+
+		// check if a given sentinel is in sdown state, and holds for a long time
+		// others still see master is up
+		gr := errgroup.Group{}
+		suite.termsVote[1] = make([]termInfo, len(suite.instances))
+		for idx := range suite.instances {
+			localSentinel := suite.instances[idx]
+			sentinelIdx := idx
+			m := getSentinelMaster(defaultMasterAddr, localSentinel)
+			gr.Go(func() error {
+				met := eventually(t, func() bool {
+					leader := tryGetFailoverLeader(m, 1)
+					if leader == "" {
+						return false
+					}
+					suite.mu.Lock()
+					suite.termsVote[1][sentinelIdx] = termInfo{
+						selfVote:      leader,
+						neighborVotes: map[string]string{},
+					} //record leader of this sentinel
+					suite.mu.Unlock()
+					return true
+				}, 10*time.Second)
+				if !met {
+					return fmt.Errorf("sentinel %s did not recognize master as o down", localSentinel.listener.Addr())
+				}
+				return nil
+			})
+		}
+		assert.NoError(t, gr.Wait())
+
+		gr2 := errgroup.Group{}
+		for idx := range suite.instances {
+			localSentinel := suite.instances[idx]
+			m := getSentinelMaster(defaultMasterAddr, localSentinel)
+			m.mu.Lock()
+
+			for sentinelIdx := range m.sentinels {
+				si := m.sentinels[sentinelIdx]
+				si.mu.Lock()
+				neighborID := si.runID
+				si.mu.Unlock()
+
+				instanceIdx := idx
+
+				gr2.Go(func() error {
+					met := eventually(t, func() bool {
+						leader := tryGetNeighborVote(si, 1)
+						if leader == "" {
+							return false
+						}
+						suite.mu.Lock()
+						termInfo := suite.termsVote[1][instanceIdx]
+
+						if termInfo.neighborVotes == nil {
+							termInfo.neighborVotes = map[string]string{}
+						}
+						termInfo.neighborVotes[neighborID] = leader
+						suite.termsVote[1][instanceIdx] = termInfo
+
+						suite.mu.Unlock()
+
+						return true
+					}, 10*time.Second)
+					if !met {
+						return fmt.Errorf("sentinel %s cannot get its neighbor's leader in term %d", localSentinel.listener.Addr(), 1)
+					}
+					return nil
+				})
+
+			}
+			m.mu.Unlock()
+		}
+		assert.NoError(t, gr2.Wait())
+
+		for idx := range suite.instances {
+			thisInstanceHistory := suite.termsVote[1][idx]
+			thisInstanceVote := thisInstanceHistory.selfVote
+
+			thisInstanceID := suite.instances[idx].runID
+
+			for idx2 := range suite.instances {
+				if idx2 == idx {
+					continue
+				}
+				neiborInstanceVote := suite.termsVote[1][idx2]
+				if neiborInstanceVote.neighborVotes[thisInstanceID] != thisInstanceVote {
+					assert.Failf(t, "conflict vote between instances",
+						"instance %s records that instance %s voted for %s, but %s says it voted for %s",
+						suite.instances[idx2].runID,
+						thisInstanceID,
+						neiborInstanceVote.neighborVotes[thisInstanceID],
+						thisInstanceID,
+						thisInstanceVote,
+					)
+				}
+			}
+		}
+		// 1.for each instance, compare its vote with how other instances records its vote
+		// 2.record each instance leader, find real leader of that term
+		// 3.find that real leader and check if its failover state is something in selecting slave
+	}
+	t.Run("3 instances leader election", func(t *testing.T) {
+		testLeader(t, 3)
+	})
+}
+
+func tryGetNeighborVote(si *sentinelInstance, term int) string {
+	si.mu.Lock()
+	defer si.mu.Unlock()
+	if si.leaderEpoch != term {
+		return ""
+	}
+	return si.leaderID
+}
+func getSentinelMaster(masterAddr string, s *Sentinel) *masterInstance {
+	s.mu.Lock()
+	m := s.masterInstances[masterAddr]
+	s.mu.Unlock()
+	return m
+}
+
+func tryGetFailoverLeader(m *masterInstance, termID int) string {
+	if m.getFailOverEpoch() != termID {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.leaderID
 }
 func eventually(t *testing.T, f func() bool, duration time.Duration) bool {
 	return assert.Eventually(t, f, duration, 50*time.Millisecond)
 }
 
 func checkMasterState(t *testing.T, masterAddr string, s *Sentinel, state masterInstanceState) {
-	s.mu.Lock()
-	m := s.masterInstances[masterAddr]
-	s.mu.Unlock()
-	assert.Equal(t, state, m.getState())
+	assert.Equal(t, state, getSentinelMaster(masterAddr, s).getState())
 }
 
 func masterStateIs(masterAddr string, s *Sentinel, state masterInstanceState) bool {

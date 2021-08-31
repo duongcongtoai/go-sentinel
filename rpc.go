@@ -51,15 +51,17 @@ func (s *Sentinel) voteLeader(m *masterInstance, reqEpoch int, reqRunID string) 
 	if reqEpoch > s.getCurrentEpoch() {
 		s.updateEpoch(reqEpoch)
 	}
+	selfID := s.selfID()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.leaderEpoch < reqEpoch {
+		logger.Errorf("sentinel %s updated leader to %s with epoch %d", selfID, reqRunID, reqEpoch)
 		m.leaderID = reqRunID
 		m.leaderEpoch = reqEpoch
 
 		// failover start at some other sentinel that we have just voted for
-		if m.leaderID != s.selfID() {
+		if m.leaderID != selfID {
 			m.failOverStartTime = time.Now().Add(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC)))
 		}
 	}
@@ -79,6 +81,7 @@ func (s *Sentinel) IsMasterDownByAddr(req *IsMasterDownByAddrArgs, reply *IsMast
 		return err
 	}
 	reply.MasterDown = master.getState() >= masterStateSubjDown
+
 	if req.SelfID != "" {
 		leaderEpoch, leaderID := s.voteLeader(master, req.CurrentEpoch, req.SelfID)
 		reply.LeaderEpoch = leaderEpoch

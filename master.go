@@ -64,11 +64,6 @@ func (m *masterInstance) getFailOverStartTime() time.Time {
 	return m.failOverStartTime
 }
 
-func (m *masterInstance) setFailOverEpoch(newEpoch int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.failOverEpoch = newEpoch
-}
 func (m *masterInstance) getFailOverEpoch() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -211,7 +206,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 			for m.getState() == masterStateObjDown {
 				// this code only has to wait in case failover timeout reached and it needs to wait 1 more failover timeout duration
 				// before trying failover again
-				secondsLeft := time.Since(m.getFailOverStartTime()) - 2*m.sentinelConf.FailoverTimeout
+				secondsLeft := 2*m.sentinelConf.FailoverTimeout - time.Since(m.getFailOverStartTime())
 				if secondsLeft <= 0 {
 					locked(s.mu, func() {
 						s.currentEpoch += 1
@@ -223,6 +218,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					})
 					break
 				}
+				logger.Debugf("sleeping for %s", secondsLeft.String())
 				<-time.NewTimer(secondsLeft).C
 			}
 			// If any logic changing state of master to something != masterStateObjDown, this code below will be broken
@@ -259,12 +255,6 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 			}
 		}
 	}
-}
-
-func locked(mu *sync.Mutex, f func()) {
-	mu.Lock()
-	defer mu.Unlock()
-	f()
 }
 
 func (s *Sentinel) checkWhoIsLeader(m *masterInstance) string {
@@ -321,9 +311,11 @@ func (s *Sentinel) checkObjDown(m *masterInstance) {
 
 	down := 1
 	for _, sentinel := range m.sentinels {
+		sentinel.mu.Lock()
 		if sentinel.sdown {
 			down++
 		}
+		sentinel.mu.Unlock()
 	}
 	if down >= quorum {
 		m.state = masterStateObjDown
@@ -339,12 +331,13 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 	for idx := range m.sentinels {
 		sentinel := m.sentinels[idx]
 		go func() {
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
 			for m.getState() >= masterStateSubjDown {
 				select {
 				case <-ctx.Done():
 					return
-				default:
-
+				case <-ticker.C:
 					sentinel.mu.Lock()
 					lastReply := sentinel.lastMasterDownReply
 					sentinel.mu.Unlock()
