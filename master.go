@@ -28,7 +28,7 @@ func (s *Sentinel) masterPingRoutine(m *masterInstance) {
 				if m.getState() == masterStateUp {
 					m.mu.Lock()
 					m.state = masterStateSubjDown
-					logger.Warnf("master %s is subjectively down", m.name)
+					s.logger.Warnf("master %s is subjectively down", m.name)
 					m.mu.Unlock()
 					select {
 					case m.subjDownNotify <- struct{}{}:
@@ -103,7 +103,7 @@ func (s *Sentinel) sayHelloRoutine(m *masterInstance, helloChan HelloChan) {
 		)
 		err := helloChan.Publish(info)
 		if err != nil {
-			logger.Errorf("helloChan.Publish: %s", err)
+			s.logger.Errorf("helloChan.Publish: %s", err)
 		}
 	}
 }
@@ -115,13 +115,13 @@ func (s *Sentinel) subscribeHello(m *masterInstance) {
 	for !m.killed() {
 		newmsg, err := helloChan.Receive()
 		if err != nil {
-			logger.Errorf("helloChan.Receive: %s", err)
+			s.logger.Errorf("helloChan.Receive: %s", err)
 			continue
 			//skip for now
 		}
 		parts := strings.Split(newmsg, ",")
 		if len(parts) != 8 {
-			logger.Errorf("helloChan.Receive: invalid format for newmsg: %s", newmsg)
+			s.logger.Errorf("helloChan.Receive: invalid format for newmsg: %s", newmsg)
 			continue
 		}
 		runid := parts[2]
@@ -130,7 +130,7 @@ func (s *Sentinel) subscribeHello(m *masterInstance) {
 		if !ok {
 			client, err := newRPCClient(parts[0], parts[1])
 			if err != nil {
-				logger.Errorf("newRPCClient: cannot create new client to other sentinel with info: %s", newmsg)
+				s.logger.Errorf("newRPCClient: cannot create new client to other sentinel with info: %s", newmsg)
 				m.mu.Unlock()
 				continue
 			}
@@ -142,7 +142,7 @@ func (s *Sentinel) subscribeHello(m *masterInstance) {
 			}
 
 			m.sentinels[runid] = si
-			logger.Infof("subscribeHello: connected to new sentinel: %s", newmsg)
+			s.logger.Infof("subscribeHello: connected to new sentinel: %s", newmsg)
 		}
 		m.mu.Unlock()
 		//ignore if exist for now
@@ -171,7 +171,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 				}
 				roleSwitched, err := s.parseInfoMaster(m.getAddr(), info)
 				if err != nil {
-					logger.Errorf("parseInfoMaster: %v", err)
+					s.logger.Errorf("parseInfoMaster: %v", err)
 					continue
 					// continue for now
 				}
@@ -218,7 +218,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					})
 					break
 				}
-				logger.Debugf("sleeping for %s", secondsLeft.String())
+				s.logger.Debugf("sleeping for %s", secondsLeft.String())
 				<-time.NewTimer(secondsLeft).C
 			}
 			// If any logic changing state of master to something != masterStateObjDown, this code below will be broken
@@ -227,7 +227,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 				switch m.getFailOverState() {
 				case failOverWaitLeaderElection:
 					//check if is leader yet
-					leader := s.checkWhoIsLeader(m)
+					leader, epoch := s.checkWhoIsLeader(m)
 					isLeader := leader != "" && leader == s.selfID()
 					if !isLeader {
 						time.Sleep(1 * time.Second)
@@ -239,8 +239,13 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 							cancel()
 							break failOverFSM
 						}
+						continue
 					}
+
 					// do not call cancel(), keep receiving update from other sentinel
+					s.logger.Debugw(logEventBecameTermLeader,
+						"run_id", s.selfID(),
+						"epoch", epoch)
 					m.mu.Lock()
 					m.failOverState = failOverSelectSlave
 					m.mu.Unlock()
@@ -257,7 +262,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 	}
 }
 
-func (s *Sentinel) checkWhoIsLeader(m *masterInstance) string {
+func (s *Sentinel) checkWhoIsLeader(m *masterInstance) (string, int) {
 	leaders := map[string]int{}
 	currentEpoch := s.getCurrentEpoch()
 	m.mu.Lock()
@@ -297,7 +302,7 @@ func (s *Sentinel) checkWhoIsLeader(m *masterInstance) string {
 	if winner != "" && (maxVote < quorum || maxVote < m.sentinelConf.Quorum) {
 		winner = ""
 	}
-	return winner
+	return winner, currentEpoch
 }
 
 func (s *Sentinel) checkObjDown(m *masterInstance) {
@@ -361,19 +366,19 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 						SelfID:       selfID,
 					})
 					if err != nil {
-						logger.Errorf("sentinel.client.IsMasterDownByAddr: %s", err)
+						s.logger.Errorf("sentinel.client.IsMasterDownByAddr: %s", err)
 						//skip for now
 					} else {
 						sentinel.mu.Lock()
 						sentinel.lastMasterDownReply = time.Now()
 						sentinel.sdown = reply.MasterDown
 						if reply.VotedLeaderID != "" {
-							if sentinel.leaderID != reply.VotedLeaderID {
-								logger.Infof("sentinel.client.IsMasterDownByAddr: sentinel %s voted for %s",
-									sentinel.runID,
-									reply.VotedLeaderID,
-								)
-							}
+
+							s.logger.Debugw(logEventNeighborVotedFor,
+								"neighbor_id", sentinel.runID,
+								"voted_for", reply.VotedLeaderID,
+								"epoch", reply.LeaderEpoch,
+							)
 							sentinel.leaderEpoch = reply.LeaderEpoch
 							sentinel.leaderID = reply.VotedLeaderID
 						}

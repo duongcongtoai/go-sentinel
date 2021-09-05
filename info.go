@@ -25,7 +25,7 @@ func (s *Sentinel) parseInfoSlave(masterName, slaveAddr, info string) (bool, err
 	s.mu.Unlock()
 	if !ok {
 		err := fmt.Errorf("master does not exist")
-		logger.Errorf(err.Error())
+		s.logger.Errorf(err.Error())
 		return false, err
 	}
 	m.mu.Lock()
@@ -130,7 +130,7 @@ func (s *Sentinel) parseInfoMaster(masterAddress string, info string) (bool, err
 	s.mu.Unlock()
 	if !ok {
 		err := fmt.Errorf("master %s does not exist", masterAddress)
-		logger.Errorf(err.Error())
+		s.logger.Errorf(err.Error())
 		return false, err
 	}
 	m.mu.Lock()
@@ -188,7 +188,7 @@ func (s *Sentinel) parseInfoMaster(masterAddress string, info string) (bool, err
 					}
 					err := s.slaveFactory(newslave)
 					if err != nil {
-						logger.Errorf("s.slaveFactory: %s", err)
+						s.logger.Errorf("s.slaveFactory: %s", err)
 						continue
 					}
 					newSlaves = append(newSlaves, newslave)

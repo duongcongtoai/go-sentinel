@@ -10,20 +10,43 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
+
+var (
+	stdLogger *zap.SugaredLogger
+)
+
+func init() {
+	stdLogger = newLogger()
+}
+
+func customLogObserver() (*zap.SugaredLogger, *observer.ObservedLogs) {
+	observedCore, recordedLogs := observer.New(zap.DebugLevel)
+	normalCore := stdLogger.Desugar().Core()
+	teeCore := zapcore.NewTee(observedCore, normalCore)
+	built := zap.New(teeCore, zap.WithCaller(true)).Sugar()
+	return built, recordedLogs
+}
 
 var (
 	defaultMasterAddr = "localhost:6767"
 )
 
 type testSuite struct {
-	mu        *sync.Mutex
-	instances []*Sentinel
-	links     []*toyClient
-	conf      Config
-	master    *ToyKeva
+	mu            *sync.Mutex
+	mapRunIDtoIdx map[string]int // code use runID as identifier, test suite use integer index, use this to remap
+	mapIdxtoRunID map[int]string // code use runID as identifier, test suite use integer index, use this to remap
+	instances     []*Sentinel
+	links         []*toyClient
+	conf          Config
+	master        *ToyKeva
 	history
+	logObservers []*observer.ObservedLogs
+	t            testing.T
 }
 type history struct {
 	termsVote map[int][]termInfo // key by term seq, val is array of each sentinels' term info
@@ -39,6 +62,8 @@ func (t *testSuite) CleanUp() {
 	}
 }
 
+// this function also pre spawn some goroutines to continuously update testSuite state according
+// to event logs recorded from sentinels instance, test functions only need to assert those states
 func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Config)) *testSuite {
 	file := filepath.Join("test", "config", "sentinel.yaml")
 	viper.SetConfigType("yaml")
@@ -56,13 +81,18 @@ func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Conf
 	master := NewToyKeva()
 	sentinels := []*Sentinel{}
 	links := make([]*toyClient, numInstances)
+	logObservers := make([]*observer.ObservedLogs, numInstances)
 	testLock := &sync.Mutex{}
 	master.turnToMaster()
 	basePort := 2000
+	mapRunIDToIdx := map[string]int{}
+	mapIdxToRunID := map[int]string{}
 	for i := 0; i < numInstances; i++ {
 		s, err := NewFromConfig(conf)
 		s.conf.Port = strconv.Itoa(basePort + i)
 		assert.NoError(t, err)
+		mapRunIDToIdx[s.runID] = i
+		mapIdxToRunID[i] = s.runID
 
 		s.clientFactory = func(addr string) (internalClient, error) {
 			cl := NewToyKevaClient(master)
@@ -73,6 +103,10 @@ func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Conf
 		}
 		err = s.Start()
 		assert.NoError(t, err)
+
+		customLogger, observer := customLogObserver()
+		logObservers[i] = observer
+		s.logger = customLogger
 		sentinels = append(sentinels, s)
 		defer s.Shutdown()
 	}
@@ -88,7 +122,7 @@ func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Conf
 		assert.Equal(t, numInstances-1, len(masterI.sentinels))
 		masterI.mu.Unlock()
 	}
-	return &testSuite{
+	suite := &testSuite{
 		instances: sentinels,
 		links:     links,
 		mu:        new(sync.Mutex),
@@ -97,7 +131,31 @@ func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Conf
 		history: history{
 			termsVote: map[int][]termInfo{},
 		},
+		mapRunIDtoIdx: mapRunIDToIdx,
+		logObservers:  logObservers,
 	}
+	for idx := range suite.logObservers {
+		go suite.consumeLogs(idx, suite.logObservers[idx])
+	}
+	return suite
+}
+
+func (s *testSuite) consumeLogs(instanceIdx int, observer *observer.ObservedLogs) {
+	for {
+		logs := observer.TakeAll()
+		for _, entry := range logs {
+			switch entry.Message {
+			case logEventBecameTermLeader:
+				s.handleLogEventBecameTermLeader(instanceIdx, entry)
+			case logEventVotedFor:
+				s.handleLogEventSentinelVotedFor(instanceIdx, entry)
+			case logEventNeighborVotedFor:
+				s.handleLogEventNeighborVotedFor(instanceIdx, entry)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// all events that may change state of this suite from log stream appear here
 }
 
 func setup(t *testing.T, numInstances int) *testSuite {
@@ -206,8 +264,36 @@ func TestODown(t *testing.T) {
 		testOdown(t, 5)
 	})
 }
+func (suite *testSuite) checkTermVoteOfSentinel(t *testing.T, sentinelIdx int, term int) {
+	currentSentinel := suite.instances[sentinelIdx]
+	eventually(t, func() bool {
+		suite.mu.Lock()
+		defer suite.mu.Unlock()
+		termInfo := suite.termsVote[term][sentinelIdx]
+		return termInfo.selfVote != ""
+	}, 10*time.Second, "sentinel %s never votes for any instance in term %d", currentSentinel.runID, term)
 
-func TestLeaderElection(t *testing.T) {
+}
+
+func (suite *testSuite) checkTermVoteOfSentinelNeighbor(t *testing.T, instanceIdx int, neighborID string, term int) {
+	currentSentinel := suite.instances[instanceIdx]
+	eventually(t, func() bool {
+		suite.mu.Lock()
+		defer suite.mu.Unlock()
+		termInfo := suite.termsVote[term][instanceIdx]
+
+		if termInfo.neighborVotes == nil {
+			return false
+		}
+		vote := termInfo.neighborVotes[neighborID]
+		return vote != ""
+	}, 10*time.Second, "sentinel %s cannot get its neighbor's leader in term %d", currentSentinel.runID, term)
+}
+
+// TODO: refactor to logic:
+// create a stream of logs, observe from stream and change status of test suite
+// assert function wait for the change of status only
+func TestLeaderVoteNotConflict(t *testing.T) {
 	testLeader := func(t *testing.T, numInstances int) {
 		suite := setupWithCustomConfig(t, numInstances, func(c *Config) {
 			c.Masters[0].Quorum = numInstances/2 + 1 // force normal quorum
@@ -218,32 +304,17 @@ func TestLeaderElection(t *testing.T) {
 		// check if a given sentinel is in sdown state, and holds for a long time
 		// others still see master is up
 		gr := errgroup.Group{}
+		suite.mu.Lock()
 		suite.termsVote[1] = make([]termInfo, len(suite.instances))
+		suite.mu.Unlock()
 		for idx := range suite.instances {
-			localSentinel := suite.instances[idx]
-			sentinelIdx := idx
-			m := getSentinelMaster(defaultMasterAddr, localSentinel)
+			instanceIdx := idx
 			gr.Go(func() error {
-				met := eventually(t, func() bool {
-					leader := tryGetFailoverLeader(m, 1)
-					if leader == "" {
-						return false
-					}
-					suite.mu.Lock()
-					suite.termsVote[1][sentinelIdx] = termInfo{
-						selfVote:      leader,
-						neighborVotes: map[string]string{},
-					} //record leader of this sentinel
-					suite.mu.Unlock()
-					return true
-				}, 10*time.Second)
-				if !met {
-					return fmt.Errorf("sentinel %s did not recognize master as o down", localSentinel.listener.Addr())
-				}
+				suite.checkTermVoteOfSentinel(t, instanceIdx, 1)
 				return nil
 			})
 		}
-		assert.NoError(t, gr.Wait())
+		gr.Wait()
 
 		gr2 := errgroup.Group{}
 		for idx := range suite.instances {
@@ -260,34 +331,13 @@ func TestLeaderElection(t *testing.T) {
 				instanceIdx := idx
 
 				gr2.Go(func() error {
-					met := eventually(t, func() bool {
-						leader := tryGetNeighborVote(si, 1)
-						if leader == "" {
-							return false
-						}
-						suite.mu.Lock()
-						termInfo := suite.termsVote[1][instanceIdx]
-
-						if termInfo.neighborVotes == nil {
-							termInfo.neighborVotes = map[string]string{}
-						}
-						termInfo.neighborVotes[neighborID] = leader
-						suite.termsVote[1][instanceIdx] = termInfo
-
-						suite.mu.Unlock()
-
-						return true
-					}, 10*time.Second)
-					if !met {
-						return fmt.Errorf("sentinel %s cannot get its neighbor's leader in term %d", localSentinel.listener.Addr(), 1)
-					}
+					suite.checkTermVoteOfSentinelNeighbor(t, instanceIdx, neighborID, 1)
 					return nil
 				})
-
 			}
 			m.mu.Unlock()
 		}
-		assert.NoError(t, gr2.Wait())
+		gr2.Wait()
 
 		for idx := range suite.instances {
 			thisInstanceHistory := suite.termsVote[1][idx]
@@ -321,14 +371,6 @@ func TestLeaderElection(t *testing.T) {
 	})
 }
 
-func tryGetNeighborVote(si *sentinelInstance, term int) string {
-	si.mu.Lock()
-	defer si.mu.Unlock()
-	if si.leaderEpoch != term {
-		return ""
-	}
-	return si.leaderID
-}
 func getSentinelMaster(masterAddr string, s *Sentinel) *masterInstance {
 	s.mu.Lock()
 	m := s.masterInstances[masterAddr]
@@ -336,16 +378,8 @@ func getSentinelMaster(masterAddr string, s *Sentinel) *masterInstance {
 	return m
 }
 
-func tryGetFailoverLeader(m *masterInstance, termID int) string {
-	if m.getFailOverEpoch() != termID {
-		return ""
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.leaderID
-}
-func eventually(t *testing.T, f func() bool, duration time.Duration) bool {
-	return assert.Eventually(t, f, duration, 50*time.Millisecond)
+func eventually(t *testing.T, f func() bool, duration time.Duration, msgAndArgs ...interface{}) bool {
+	return assert.Eventually(t, f, duration, 50*time.Millisecond, msgAndArgs...)
 }
 
 func checkMasterState(t *testing.T, masterAddr string, s *Sentinel, state masterInstanceState) {

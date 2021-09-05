@@ -47,6 +47,7 @@ func (s *Sentinel) updateEpoch(newEpoch int) {
 func (s *Sentinel) selfID() string {
 	return s.runID
 }
+
 func (s *Sentinel) voteLeader(m *masterInstance, reqEpoch int, reqRunID string) (leaderEpoch int, leaderID string) {
 	if reqEpoch > s.getCurrentEpoch() {
 		s.updateEpoch(reqEpoch)
@@ -56,7 +57,6 @@ func (s *Sentinel) voteLeader(m *masterInstance, reqEpoch int, reqRunID string) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.leaderEpoch < reqEpoch {
-		logger.Errorf("sentinel %s updated leader to %s with epoch %d", selfID, reqRunID, reqEpoch)
 		m.leaderID = reqRunID
 		m.leaderEpoch = reqEpoch
 
@@ -77,13 +77,17 @@ func (s *Sentinel) IsMasterDownByAddr(req *IsMasterDownByAddrArgs, reply *IsMast
 	s.mu.Unlock()
 	if !exist {
 		err := fmt.Errorf("master does not exist")
-		logger.Errorf(err.Error())
+		s.logger.Errorf(err.Error())
 		return err
 	}
 	reply.MasterDown = master.getState() >= masterStateSubjDown
 
 	if req.SelfID != "" {
 		leaderEpoch, leaderID := s.voteLeader(master, req.CurrentEpoch, req.SelfID)
+		s.logger.Debugw(logEventVotedFor,
+			"voted_for", leaderID,
+			"epoch", leaderEpoch,
+		)
 		reply.LeaderEpoch = leaderEpoch
 		reply.VotedLeaderID = leaderID
 	}
