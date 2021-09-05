@@ -46,10 +46,13 @@ type testSuite struct {
 	master        *ToyKeva
 	history
 	logObservers []*observer.ObservedLogs
-	t            testing.T
+	t            *testing.T
 }
 type history struct {
-	termsVote map[int][]termInfo // key by term seq, val is array of each sentinels' term info
+	currentLeader string
+	currentTerm   int
+	termsVote     map[int][]termInfo // key by term seq, val is array of each sentinels' term info
+	termsLeader   map[int]string
 }
 type termInfo struct {
 	selfVote      string
@@ -129,10 +132,12 @@ func setupWithCustomConfig(t *testing.T, numInstances int, customConf func(*Conf
 		conf:      conf,
 		master:    master,
 		history: history{
-			termsVote: map[int][]termInfo{},
+			termsVote:   map[int][]termInfo{},
+			termsLeader: map[int]string{},
 		},
 		mapRunIDtoIdx: mapRunIDToIdx,
 		logObservers:  logObservers,
+		t:             t,
 	}
 	for idx := range suite.logObservers {
 		go suite.consumeLogs(idx, suite.logObservers[idx])
@@ -290,11 +295,10 @@ func (suite *testSuite) checkTermVoteOfSentinelNeighbor(t *testing.T, instanceId
 	}, 10*time.Second, "sentinel %s cannot get its neighbor's leader in term %d", currentSentinel.runID, term)
 }
 
-// TODO: refactor to logic:
-// create a stream of logs, observe from stream and change status of test suite
-// assert function wait for the change of status only
+// - create a stream of logs, observe from stream and change status of test suite
+// - assert function wait for the change of status only
 func TestLeaderVoteNotConflict(t *testing.T) {
-	testLeader := func(t *testing.T, numInstances int) {
+	assertion := func(t *testing.T, numInstances int) {
 		suite := setupWithCustomConfig(t, numInstances, func(c *Config) {
 			c.Masters[0].Quorum = numInstances/2 + 1 // force normal quorum
 		})
@@ -366,9 +370,32 @@ func TestLeaderVoteNotConflict(t *testing.T) {
 		// 2.record each instance leader, find real leader of that term
 		// 3.find that real leader and check if its failover state is something in selecting slave
 	}
-	t.Run("3 instances leader election", func(t *testing.T) {
-		testLeader(t, 3)
+	t.Run("3 instances do not conflict", func(t *testing.T) {
+		assertion(t, 3)
 	})
+}
+
+func TestLeaderElection(t *testing.T) {
+	assertion := func(t *testing.T, numInstances int) {
+		suite := setupWithCustomConfig(t, numInstances, func(c *Config) {
+			c.Masters[0].Quorum = numInstances/2 + 1 // force normal quorum
+		})
+		suite.master.kill()
+		time.Sleep(suite.conf.Masters[0].DownAfter)
+		//TODO: check more info of this recognized leader
+		suite.checkClusterHasLeader()
+	}
+	t.Run("3 instances vote leader success", func(t *testing.T) {
+		assertion(t, 3)
+	})
+}
+func (s *testSuite) checkClusterHasLeader() {
+	eventually(s.t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.currentLeader != ""
+	}, 10*time.Second)
+
 }
 
 func getSentinelMaster(masterAddr string, s *Sentinel) *masterInstance {

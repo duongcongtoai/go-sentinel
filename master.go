@@ -212,10 +212,16 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 						s.currentEpoch += 1
 						locked(&m.mu, func() {
 							m.failOverState = failOverWaitLeaderElection
-							m.failOverStartTime = time.Now().Add(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC)))
+							m.failOverStartTime = time.Now()
 							m.failOverEpoch = s.currentEpoch
 						})
 					})
+					// mostly, when obj down is met, multiples sentinels will try to send request for vote to be leader
+					// to prevent split vote, sleep for a random small duration
+					random := rand.Intn(SENTINEL_MAX_DESYNC) * int(time.Millisecond)
+					s.logger.Debugf("sleeping %s", time.Duration(random))
+					time.Sleep(time.Duration(random))
+					// time.Sleep(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC) * int(time.Millisecond)))
 					break
 				}
 				s.logger.Debugf("sleeping for %s", secondsLeft.String())
@@ -229,6 +235,7 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 					//check if is leader yet
 					leader, epoch := s.checkWhoIsLeader(m)
 					isLeader := leader != "" && leader == s.selfID()
+
 					if !isLeader {
 						time.Sleep(1 * time.Second)
 						//abort if failover take too long
@@ -244,8 +251,9 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 
 					// do not call cancel(), keep receiving update from other sentinel
 					s.logger.Debugw(logEventBecameTermLeader,
-						"run_id", s.selfID(),
+						"run_id", leader,
 						"epoch", epoch)
+
 					m.mu.Lock()
 					m.failOverState = failOverSelectSlave
 					m.mu.Unlock()
@@ -263,20 +271,23 @@ func (s *Sentinel) masterRoutine(m *masterInstance) {
 }
 
 func (s *Sentinel) checkWhoIsLeader(m *masterInstance) (string, int) {
-	leaders := map[string]int{}
+	instancesVotes := map[string]int{}
 	currentEpoch := s.getCurrentEpoch()
+	// instancesVoters := map[string][]string{}
 	m.mu.Lock()
 	for _, sen := range m.sentinels {
 		sen.mu.Lock()
 		if sen.leaderID != "" && sen.leaderEpoch == currentEpoch {
-			leaders[sen.runID] = leaders[sen.runID] + 1
+			instancesVotes[sen.leaderID] = instancesVotes[sen.leaderID] + 1
+			// instancesVoters[sen.leaderID] = append(instancesVoters[sen.leaderID], sen.runID)
 		}
 		sen.mu.Unlock()
 	}
+	totalSentinels := len(m.sentinels) + 1
 	m.mu.Unlock()
 	maxVote := 0
 	var winner string
-	for runID, vote := range leaders {
+	for runID, vote := range instancesVotes {
 		if vote > maxVote {
 			maxVote = vote
 			winner = runID
@@ -286,22 +297,36 @@ func (s *Sentinel) checkWhoIsLeader(m *masterInstance) (string, int) {
 	var leaderEpoch int
 	var votedByMe string
 	if winner != "" {
-		// vote for the most winned candidate
+		// vote for the most winning candidate
 		leaderEpoch, votedByMe = s.voteLeader(m, epoch, winner)
 	} else {
 		leaderEpoch, votedByMe = s.voteLeader(m, epoch, s.selfID())
 	}
 	if votedByMe != "" && leaderEpoch == epoch {
-		leaders[votedByMe] = leaders[votedByMe] + 1
-		if leaders[votedByMe] > maxVote {
-			maxVote = leaders[votedByMe]
+		instancesVotes[votedByMe] = instancesVotes[votedByMe] + 1
+		if instancesVotes[votedByMe] > maxVote {
+			maxVote = instancesVotes[votedByMe]
 			winner = votedByMe
 		}
+		// instancesVoters[votedByMe] = append(instancesVoters[votedByMe], s.selfID())
 	}
-	quorum := len(m.sentinels)/2 + 1
+	quorum := totalSentinels/2 + 1
 	if winner != "" && (maxVote < quorum || maxVote < m.sentinelConf.Quorum) {
 		winner = ""
 	}
+	// if winner != "" {
+	// 	out := ""
+	// 	for _, runID := range instancesVoters[winner] {
+	// 		if runID == s.selfID() {
+	// 			out += fmt.Sprintf("MEEE %s voted for %s,", runID, winner)
+	// 		} else {
+	// 			out += fmt.Sprintf("%s voted for %s,", runID, winner)
+	// 		}
+	// 	}
+	// 	out += "\n"
+	// 	s.logger.Errorf(out)
+	// }
+
 	return winner, currentEpoch
 }
 
@@ -336,56 +361,48 @@ func (s *Sentinel) askOtherSentinelsEach1Sec(ctx context.Context, m *masterInsta
 	for idx := range m.sentinels {
 		sentinel := m.sentinels[idx]
 		go func() {
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
 			for m.getState() >= masterStateSubjDown {
 				select {
 				case <-ctx.Done():
 					return
-				case <-ticker.C:
-					sentinel.mu.Lock()
-					lastReply := sentinel.lastMasterDownReply
-					sentinel.mu.Unlock()
-					if time.Since(lastReply) < 1*time.Second {
-						return
-					}
-					s.mu.Lock()
-					currentEpoch := s.currentEpoch //epoch may change during failover
-					selfID := s.runID              // locked as well for sure
-					s.mu.Unlock()
-
-					// do not ask for vote if has not started failover
-					if m.getFailOverState() == failOverNone {
-						selfID = ""
-					}
-					reply, err := sentinel.client.IsMasterDownByAddr(IsMasterDownByAddrArgs{
-						Name:         masterName,
-						IP:           masterIp,
-						Port:         masterPort,
-						CurrentEpoch: currentEpoch,
-						SelfID:       selfID,
-					})
-					if err != nil {
-						s.logger.Errorf("sentinel.client.IsMasterDownByAddr: %s", err)
-						//skip for now
-					} else {
-						sentinel.mu.Lock()
-						sentinel.lastMasterDownReply = time.Now()
-						sentinel.sdown = reply.MasterDown
-						if reply.VotedLeaderID != "" {
-
-							s.logger.Debugw(logEventNeighborVotedFor,
-								"neighbor_id", sentinel.runID,
-								"voted_for", reply.VotedLeaderID,
-								"epoch", reply.LeaderEpoch,
-							)
-							sentinel.leaderEpoch = reply.LeaderEpoch
-							sentinel.leaderID = reply.VotedLeaderID
-						}
-
-						sentinel.mu.Unlock()
-					}
+				default:
 				}
+
+				s.mu.Lock()
+				currentEpoch := s.currentEpoch //epoch may change during failover
+				selfID := s.runID              // locked as well for sure
+				s.mu.Unlock()
+
+				// do not ask for vote if has not started failover
+				if m.getFailOverState() == failOverNone {
+					selfID = ""
+				}
+				reply, err := sentinel.client.IsMasterDownByAddr(IsMasterDownByAddrArgs{
+					Name:         masterName,
+					IP:           masterIp,
+					Port:         masterPort,
+					CurrentEpoch: currentEpoch,
+					SelfID:       selfID,
+				})
+				if err != nil {
+					s.logger.Errorf("sentinel.client.IsMasterDownByAddr: %s", err)
+					//skip for now
+				} else {
+					sentinel.mu.Lock()
+					sentinel.sdown = reply.MasterDown
+					if reply.VotedLeaderID != "" {
+						s.logger.Debugw(logEventNeighborVotedFor,
+							"neighbor_id", sentinel.runID,
+							"voted_for", reply.VotedLeaderID,
+							"epoch", reply.LeaderEpoch,
+						)
+						sentinel.leaderEpoch = reply.LeaderEpoch
+						sentinel.leaderID = reply.VotedLeaderID
+					}
+
+					sentinel.mu.Unlock()
+				}
+				time.Sleep(1 * time.Second)
 			}
 
 		}()

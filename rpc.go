@@ -3,7 +3,6 @@ package sentinel
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -62,7 +61,7 @@ func (s *Sentinel) voteLeader(m *masterInstance, reqEpoch int, reqRunID string) 
 
 		// failover start at some other sentinel that we have just voted for
 		if m.leaderID != selfID {
-			m.failOverStartTime = time.Now().Add(time.Duration(rand.Intn(SENTINEL_MAX_DESYNC)))
+			m.failOverStartTime = time.Now()
 		}
 	}
 	leaderEpoch = m.leaderEpoch

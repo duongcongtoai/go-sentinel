@@ -13,6 +13,10 @@ func (suite *testSuite) handleLogEventSentinelVotedFor(instanceIdx int, log obse
 
 	suite.mu.Lock()
 	defer suite.mu.Unlock()
+	_, exist := suite.termsVote[term]
+	if !exist {
+		suite.termsVote[term] = make([]termInfo, len(suite.instances))
+	}
 	termInfo := suite.termsVote[term][instanceIdx]
 	if termInfo.selfVote != "" {
 		if termInfo.selfVote != votedFor {
@@ -28,8 +32,19 @@ func (suite *testSuite) handleLogEventSentinelVotedFor(instanceIdx int, log obse
 }
 
 func (suite *testSuite) handleLogEventBecameTermLeader(instanceIdx int, log observer.LoggedEntry) {
-	panic("unimplemented")
-
+	ctxMap := log.ContextMap()
+	leader := ctxMap["run_id"].(string)
+	term := int(ctxMap["epoch"].(int64))
+	suite.mu.Lock()
+	defer suite.mu.Unlock()
+	previousLeader, exist := suite.termsLeader[term]
+	if exist {
+		suite.t.Fatalf("term %d has multiple leader recognition event, previously is %s and current is %s",
+			term, previousLeader, leader)
+	}
+	suite.termsLeader[term] = leader
+	suite.currentLeader = leader
+	suite.currentTerm = term
 }
 
 func (suite *testSuite) handleLogEventNeighborVotedFor(instanceIdx int, log observer.LoggedEntry) {
@@ -40,6 +55,10 @@ func (suite *testSuite) handleLogEventNeighborVotedFor(instanceIdx int, log obse
 
 	suite.mu.Lock()
 	defer suite.mu.Unlock()
+	_, exist := suite.termsVote[term]
+	if !exist {
+		suite.termsVote[term] = make([]termInfo, len(suite.instances))
+	}
 	termInfo := suite.termsVote[term][instanceIdx]
 
 	if termInfo.neighborVotes == nil {
